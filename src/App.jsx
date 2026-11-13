@@ -6,6 +6,8 @@ import PreparationPhase from './components/PreparationPhase';
 import PriceSetter from './components/PriceSetter';
 import SimulationModal from './components/SimulationModal';
 import EndOfDayReport from './components/EndOfDayReport';
+import MilkShockModal from './components/MilkShockModal';
+import MilkShockBanner from './components/MilkShockBanner';
 import TycoonGuide from './components/TycoonGuide';
 import {
   INITIAL_BUDGET,
@@ -15,7 +17,10 @@ import {
 } from './constants/gameData';
 import { runDaySimulation } from './utils/simulationEngine';
 import { calculateBrewCapacity } from './utils/gameLogic';
-import { ShieldCheck, Play, AlertCircle, Sparkles, CheckCircle2, ChevronRight } from 'lucide-react';
+import { ShieldCheck, Play, AlertCircle, Sparkles, CheckCircle2 } from 'lucide-react';
+
+const NORMAL_MILK_PRICE = 4;
+const SPIKED_MILK_PRICE = 12;
 
 export default function App() {
   // Budget state (persisted)
@@ -48,13 +53,24 @@ export default function App() {
     return saved !== null ? Number(saved) : DEFAULT_CHAI_PRICE;
   });
 
+  // Milk Shock Event States
+  const [isMilkShockActive, setIsMilkShockActive] = useState(() => {
+    return localStorage.getItem('chai_tycoon_milk_shock') === 'true';
+  });
+
+  const [shockStrategy, setShockStrategy] = useState(() => {
+    return localStorage.getItem('chai_tycoon_shock_strategy') || null;
+  });
+
+  const [isShockModalOpen, setIsShockModalOpen] = useState(false);
+
   // Wholesale market prices for ingredients
   const [marketPrices, setMarketPrices] = useState(() => {
     const saved = localStorage.getItem('chai_tycoon_prices');
     if (saved) return JSON.parse(saved);
     return {
       teaLeaves: INGREDIENTS.teaLeaves.basePrice,
-      milk: INGREDIENTS.milk.basePrice,
+      milk: NORMAL_MILK_PRICE,
       sugar: INGREDIENTS.sugar.basePrice,
       cups: INGREDIENTS.cups.basePrice,
     };
@@ -95,6 +111,18 @@ export default function App() {
   }, [marketPrices]);
 
   useEffect(() => {
+    localStorage.setItem('chai_tycoon_milk_shock', isMilkShockActive.toString());
+  }, [isMilkShockActive]);
+
+  useEffect(() => {
+    if (shockStrategy) {
+      localStorage.setItem('chai_tycoon_shock_strategy', shockStrategy);
+    } else {
+      localStorage.removeItem('chai_tycoon_shock_strategy');
+    }
+  }, [shockStrategy]);
+
+  useEffect(() => {
     if (lastReport) {
       localStorage.setItem('chai_tycoon_last_report', JSON.stringify(lastReport));
     } else {
@@ -114,6 +142,49 @@ export default function App() {
     setAppAlert(null);
   };
 
+  // Trigger Milk Price Shock event
+  const handleTriggerMilkShock = () => {
+    setIsMilkShockActive(true);
+    setMarketPrices((prev) => ({ ...prev, milk: SPIKED_MILK_PRICE }));
+    setIsShockModalOpen(true);
+  };
+
+  // Reset Milk Price Shock
+  const handleResetMilkShock = () => {
+    setIsMilkShockActive(false);
+    setShockStrategy(null);
+    setMarketPrices((prev) => ({ ...prev, milk: NORMAL_MILK_PRICE }));
+    setIsShockModalOpen(false);
+    setAppAlert({
+      type: 'success',
+      message: 'Milk market stabilized! Wholesale milk price returned to normal ₹4/portion.',
+    });
+  };
+
+  // Handle Decision Option from Milk Shock Modal
+  const handleSelectShockOption = (option) => {
+    setShockStrategy(option);
+    setIsShockModalOpen(false);
+
+    if (option === 'raise_price') {
+      setChaiPrice((prev) => prev + 10);
+      setAppAlert({
+        type: 'info',
+        message: `Strategic decision: Raised chai price by +₹10 (now ₹${chaiPrice + 10}) to absorb milk price spike.`,
+      });
+    } else if (option === 'dilute_water') {
+      setAppAlert({
+        type: 'info',
+        message: 'Strategic decision: Diluting with water. Each milk portion yields 2 cups of chai, but expect customer scrutiny!',
+      });
+    } else if (option === 'absorb_loss') {
+      setAppAlert({
+        type: 'info',
+        message: 'Strategic decision: Taking the loss. Paying ₹12 for milk to preserve 100% authentic kadak chai quality and reputation.',
+      });
+    }
+  };
+
   // Launch the local simulation engine
   const handleStartDay = () => {
     const capacity = calculateBrewCapacity(inventory);
@@ -125,10 +196,13 @@ export default function App() {
       return;
     }
 
+    const isDiluted = isMilkShockActive && shockStrategy === 'dilute_water';
+
     // Run the local simulation algorithm
     const simResult = runDaySimulation({
       chaiPrice,
       inventory,
+      milkDilution: isDiluted,
       reputation,
     });
 
@@ -150,24 +224,47 @@ export default function App() {
 
     // Update reputation smoothly
     setReputation((prev) => {
+      let delta = 0;
+      if (isMilkShockActive && shockStrategy === 'dilute_water') {
+        delta -= 0.3; // Customer backlash for water dilution
+      } else if (isMilkShockActive && shockStrategy === 'absorb_loss') {
+        delta += 0.2; // Bonus for preserving authentic quality
+      }
+
       if (activeSimulation.lostCustomers > 8) {
-        return Math.max(2.0, Number((prev - 0.2).toFixed(1)));
+        delta -= 0.2;
+      } else if (activeSimulation.lostCustomers === 0 && activeSimulation.cupsSold > 10) {
+        delta += 0.1;
       }
-      if (activeSimulation.lostCustomers === 0 && activeSimulation.cupsSold > 10) {
-        return Math.min(5.0, Number((prev + 0.1).toFixed(1)));
-      }
-      return prev;
+
+      const updated = Math.min(5.0, Math.max(1.5, Number((prev + delta).toFixed(1))));
+      return updated;
     });
   };
 
-  // Advance to Next Day
+  // Advance to Next Day (with random 25% chance of milk shock event!)
   const handleNextDay = () => {
-    setDay((prev) => prev + 1);
+    const nextDayNum = day + 1;
+    setDay(nextDayNum);
     setLastReport(null);
-    setAppAlert({
-      type: 'success',
-      message: `Welcome to Day ${day + 1}! Review today's wholesale prices and stock your cart.`,
-    });
+
+    // Random daily event roll (25% chance on day change)
+    const shouldShockTrigger = Math.random() < 0.25;
+    if (shouldShockTrigger && !isMilkShockActive) {
+      setIsMilkShockActive(true);
+      setMarketPrices((prev) => ({ ...prev, milk: SPIKED_MILK_PRICE }));
+      setShockStrategy(null);
+      setIsShockModalOpen(true);
+      setAppAlert({
+        type: 'error',
+        message: `Day ${nextDayNum} Alert: A dairy union strike just spiked the wholesale milk price to ₹${SPIKED_MILK_PRICE}!`,
+      });
+    } else {
+      setAppAlert({
+        type: 'success',
+        message: `Welcome to Day ${nextDayNum}! Review today's wholesale prices and stock your cart.`,
+      });
+    }
   };
 
   // Reset simulation to Day 1
@@ -178,20 +275,24 @@ export default function App() {
       setDay(1);
       setReputation(5.0);
       setChaiPrice(DEFAULT_CHAI_PRICE);
+      setIsMilkShockActive(false);
+      setShockStrategy(null);
       setMarketPrices({
         teaLeaves: INGREDIENTS.teaLeaves.basePrice,
-        milk: INGREDIENTS.milk.basePrice,
+        milk: NORMAL_MILK_PRICE,
         sugar: INGREDIENTS.sugar.basePrice,
         cups: INGREDIENTS.cups.basePrice,
       });
       setLastReport(null);
       setActiveSimulation(null);
       setIsSimulating(false);
+      setIsShockModalOpen(false);
       localStorage.clear();
     }
   };
 
   const currentCapacity = calculateBrewCapacity(inventory);
+  const isDilutedToday = isMilkShockActive && shockStrategy === 'dilute_water';
 
   return (
     <div className="min-h-screen bg-stone-100/70 text-stone-900 flex flex-col">
@@ -209,7 +310,7 @@ export default function App() {
         <div className="bg-gradient-to-r from-amber-500/15 via-amber-500/5 to-transparent border border-amber-500/30 rounded-2xl p-4 sm:p-5 mb-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-2xl bg-amber-500 text-amber-950 font-bold flex items-center justify-center shadow-xs shrink-0 text-xl">
-              {lastReport ? '📊' : '🌅'}
+              {lastReport ? '📊' : isMilkShockActive ? '🥛⚡' : '🌅'}
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -220,13 +321,18 @@ export default function App() {
                 </h2>
                 <span className="text-[11px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full flex items-center gap-1">
                   <ShieldCheck className="w-3 h-3" />
-                  {lastReport ? 'Report Ready' : 'Prep Mode'}
+                  {lastReport ? 'Report Ready' : 'Prep Active'}
                 </span>
+                {isMilkShockActive && (
+                  <span className="text-[11px] font-bold bg-rose-100 text-rose-800 border border-rose-300 px-2 py-0.5 rounded-full">
+                    Milk Crisis
+                  </span>
+                )}
               </div>
               <p className="text-xs text-amber-900/80">
                 {lastReport
                   ? `Review total revenue, raw ingredient costs, net profit, and customer reviews below.`
-                  : `Stock your stall, calibrate price, and start the day to simulate rush hours.`}
+                  : `Procure stock at wholesale rates, calibrate your price, and start the day to run the simulation.`}
               </p>
             </div>
           </div>
@@ -267,6 +373,16 @@ export default function App() {
           </div>
         )}
 
+        {/* Feature 5: The Milk Price Shock Interactive Trigger & Banner */}
+        <MilkShockBanner
+          isShockActive={isMilkShockActive}
+          onTriggerShock={handleTriggerMilkShock}
+          onResetShock={handleResetMilkShock}
+          milkPrice={marketPrices.milk}
+          shockStrategy={shockStrategy}
+          onOpenDecisionModal={() => setIsShockModalOpen(true)}
+        />
+
         {/* Top Dashboard KPIs */}
         <DashboardStats
           budget={budget}
@@ -282,13 +398,14 @@ export default function App() {
             chaiPrice={chaiPrice}
             marketPrices={marketPrices}
             onNextDay={handleNextDay}
+            isDiluted={isDilutedToday}
           />
         )}
 
         {/* Current Inventory Levels */}
         <InventoryOverview inventory={inventory} />
 
-        {/* Daily Wholesale Procurement Phase */}
+        {/* Feature 2: Daily Wholesale Procurement Phase */}
         <PreparationPhase
           budget={budget}
           inventory={inventory}
@@ -296,7 +413,7 @@ export default function App() {
           onConfirmPurchase={handleConfirmPurchase}
         />
 
-        {/* Set Chai Selling Price */}
+        {/* Feature 2: Set Chai Selling Price */}
         <PriceSetter
           chaiPrice={chaiPrice}
           setChaiPrice={setChaiPrice}
@@ -306,7 +423,7 @@ export default function App() {
         {/* Tycoon Operations Guide */}
         <TycoonGuide />
 
-        {/* Simulation Engine Modal */}
+        {/* Feature 3: Simulation Engine Modal */}
         {isSimulating && activeSimulation && (
           <SimulationModal
             simulationData={activeSimulation}
@@ -314,6 +431,15 @@ export default function App() {
             chaiPrice={chaiPrice}
           />
         )}
+
+        {/* Feature 5: Milk Price Shock Decision Options Modal */}
+        <MilkShockModal
+          isOpen={isShockModalOpen}
+          onClose={() => setIsShockModalOpen(false)}
+          onSelectOption={handleSelectShockOption}
+          currentPrice={chaiPrice}
+          spikedMilkPrice={SPIKED_MILK_PRICE}
+        />
       </main>
 
       {/* Footer */}
@@ -322,10 +448,10 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="font-bold text-stone-200">Chai Stall Tycoon</span>
             <span>•</span>
-            <span>Local Browser-First Engine</span>
+            <span>Production-Grade Browser Game</span>
           </div>
           <p className="text-stone-400">
-            Phase 4: End of Day Report Implemented • Zero External APIs
+            All 5 MVP Features Completed • Local Execution • Zero External APIs
           </p>
         </div>
       </footer>
